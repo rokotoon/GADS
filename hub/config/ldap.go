@@ -45,6 +45,7 @@ type LDAPConfig struct {
 	AllowInsecure        bool          `json:"allow_insecure"`
 	Timeout              time.Duration `json:"timeout"`
 	AdminGroupDN         string        `json:"admin_group_dn"`
+	AllowedGroupDNs      []string      `json:"allowed_group_dns,omitempty"`
 	GroupMemberAttribute string        `json:"group_member_attribute"`
 	AutoProvision        bool          `json:"auto_provision"`
 }
@@ -69,6 +70,7 @@ func RegisterLDAPFlags(flags *pflag.FlagSet) {
 	flags.Bool("ldap-allow-insecure", false, "Allow an unencrypted ldap:// connection without StartTLS")
 	flags.Duration("ldap-timeout", DefaultLDAPTimeout, "LDAP connection and operation timeout")
 	flags.String("ldap-admin-group-dn", "", "LDAP group DN whose members receive the admin role")
+	flags.StringArray("ldap-allowed-group-dn", nil, "LDAP group DN allowed to authenticate (repeat for multiple groups)")
 	flags.String("ldap-group-member-attribute", DefaultLDAPGroupMemberAttribute, "LDAP group attribute containing member DNs or usernames (for example memberUid)")
 	flags.Bool("ldap-auto-provision", true, "Automatically create a local GADS user after the first successful LDAP login")
 }
@@ -121,6 +123,9 @@ func loadLDAPConfig(flags *pflag.FlagSet, lookupEnv environmentLookup) (LDAPConf
 		return LDAPConfig{}, err
 	}
 	if config.AdminGroupDN, err = resolveString(flags, "ldap-admin-group-dn", "GADS_LDAP_ADMIN_GROUP_DN", "", lookupEnv); err != nil {
+		return LDAPConfig{}, err
+	}
+	if config.AllowedGroupDNs, err = resolveStringArray(flags, "ldap-allowed-group-dn", "GADS_LDAP_ALLOWED_GROUP_DNS", nil, lookupEnv); err != nil {
 		return LDAPConfig{}, err
 	}
 	if config.GroupMemberAttribute, err = resolveString(flags, "ldap-group-member-attribute", "GADS_LDAP_GROUP_MEMBER_ATTRIBUTE", DefaultLDAPGroupMemberAttribute, lookupEnv); err != nil {
@@ -189,6 +194,11 @@ func (config LDAPConfig) Validate() error {
 	if strings.TrimSpace(config.GroupMemberAttribute) == "" {
 		return fmt.Errorf("LDAP group member attribute must not be empty")
 	}
+	for _, groupDN := range config.AllowedGroupDNs {
+		if strings.TrimSpace(groupDN) == "" {
+			return fmt.Errorf("LDAP allowed group DN must not be empty")
+		}
+	}
 
 	return nil
 }
@@ -207,6 +217,36 @@ func resolveString(flags *pflag.FlagSet, flagName, envName, defaultValue string,
 	if lookupEnv != nil {
 		if value, ok := lookupEnv(envName); ok {
 			return value, nil
+		}
+	}
+
+	return defaultValue, nil
+}
+
+// resolveStringArray supports repeatable command-line flags and a semicolon-
+// separated environment value. Semicolons are used deliberately because LDAP
+// DNs themselves contain commas.
+func resolveStringArray(flags *pflag.FlagSet, flagName, envName string, defaultValue []string, lookupEnv environmentLookup) ([]string, error) {
+	if flags != nil {
+		if flag := flags.Lookup(flagName); flag != nil && flag.Changed {
+			value, err := flags.GetStringArray(flagName)
+			if err != nil {
+				return nil, fmt.Errorf("read --%s: %w", flagName, err)
+			}
+			return value, nil
+		}
+	}
+
+	if lookupEnv != nil {
+		if value, ok := lookupEnv(envName); ok {
+			var values []string
+			for _, item := range strings.Split(value, ";") {
+				item = strings.TrimSpace(item)
+				if item != "" {
+					values = append(values, item)
+				}
+			}
+			return values, nil
 		}
 	}
 
@@ -293,6 +333,7 @@ func (config LDAPConfig) LogValue() slog.Value {
 		slog.Bool("allow_insecure", config.AllowInsecure),
 		slog.Duration("timeout", config.Timeout),
 		slog.String("admin_group_dn", config.AdminGroupDN),
+		slog.Any("allowed_group_dns", config.AllowedGroupDNs),
 		slog.String("group_member_attribute", config.GroupMemberAttribute),
 		slog.Bool("auto_provision", config.AutoProvision),
 	)
@@ -300,7 +341,7 @@ func (config LDAPConfig) LogValue() slog.Value {
 
 func (config LDAPConfig) safeString() string {
 	return fmt.Sprintf(
-		"LDAPConfig{Enabled:%t URL:%q BaseDN:%q BindDN:%q BindPassword:<redacted> UserFilter:%q UsernameAttribute:%q StartTLS:%t CACertFile:%q InsecureSkipVerify:%t AllowInsecure:%t Timeout:%s AdminGroupDN:%q GroupMemberAttribute:%q AutoProvision:%t}",
+		"LDAPConfig{Enabled:%t URL:%q BaseDN:%q BindDN:%q BindPassword:<redacted> UserFilter:%q UsernameAttribute:%q StartTLS:%t CACertFile:%q InsecureSkipVerify:%t AllowInsecure:%t Timeout:%s AdminGroupDN:%q AllowedGroupDNs:%q GroupMemberAttribute:%q AutoProvision:%t}",
 		config.Enabled,
 		config.URL,
 		config.BaseDN,
@@ -313,6 +354,7 @@ func (config LDAPConfig) safeString() string {
 		config.AllowInsecure,
 		config.Timeout.String(),
 		config.AdminGroupDN,
+		config.AllowedGroupDNs,
 		config.GroupMemberAttribute,
 		config.AutoProvision,
 	)

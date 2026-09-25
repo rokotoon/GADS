@@ -43,6 +43,7 @@ func TestRegisterLDAPFlags(t *testing.T) {
 		{name: "ldap-allow-insecure", defaultValue: "false"},
 		{name: "ldap-timeout", defaultValue: DefaultLDAPTimeout.String()},
 		{name: "ldap-admin-group-dn", defaultValue: ""},
+		{name: "ldap-allowed-group-dn", defaultValue: "[]"},
 		{name: "ldap-group-member-attribute", defaultValue: DefaultLDAPGroupMemberAttribute},
 		{name: "ldap-auto-provision", defaultValue: "true"},
 	}
@@ -85,6 +86,7 @@ func TestLoadLDAPConfigFromEnvironment(t *testing.T) {
 		"GADS_LDAP_ALLOW_INSECURE":         "false",
 		"GADS_LDAP_TIMEOUT":                "12s",
 		"GADS_LDAP_ADMIN_GROUP_DN":         "cn=gads-admins,ou=groups,dc=example,dc=test",
+		"GADS_LDAP_ALLOWED_GROUP_DNS":      "cn=qa,ou=groups,dc=example,dc=test;cn=developers,ou=groups,dc=example,dc=test",
 		"GADS_LDAP_GROUP_MEMBER_ATTRIBUTE": "uniqueMember",
 		"GADS_LDAP_AUTO_PROVISION":         "false",
 	}
@@ -106,6 +108,7 @@ func TestLoadLDAPConfigFromEnvironment(t *testing.T) {
 		AllowInsecure:        false,
 		Timeout:              12 * time.Second,
 		AdminGroupDN:         "cn=gads-admins,ou=groups,dc=example,dc=test",
+		AllowedGroupDNs:      []string{"cn=qa,ou=groups,dc=example,dc=test", "cn=developers,ou=groups,dc=example,dc=test"},
 		GroupMemberAttribute: "uniqueMember",
 		AutoProvision:        false,
 	}, config)
@@ -143,6 +146,8 @@ func TestLoadLDAPConfigExplicitFlagsOverrideEnvironment(t *testing.T) {
 		"--ldap-allow-insecure=false",
 		"--ldap-timeout=9s",
 		"--ldap-admin-group-dn=cn=flag-admins,dc=flags,dc=test",
+		"--ldap-allowed-group-dn=cn=flag-qa,dc=flags,dc=test",
+		"--ldap-allowed-group-dn=cn=flag-dev,dc=flags,dc=test",
 		"--ldap-group-member-attribute=memberUid",
 		"--ldap-auto-provision=true",
 	)
@@ -164,6 +169,7 @@ func TestLoadLDAPConfigExplicitFlagsOverrideEnvironment(t *testing.T) {
 		AllowInsecure:        false,
 		Timeout:              9 * time.Second,
 		AdminGroupDN:         "cn=flag-admins,dc=flags,dc=test",
+		AllowedGroupDNs:      []string{"cn=flag-qa,dc=flags,dc=test", "cn=flag-dev,dc=flags,dc=test"},
 		GroupMemberAttribute: "memberUid",
 		AutoProvision:        true,
 	}, config)
@@ -338,6 +344,11 @@ func TestLDAPConfigValidate(t *testing.T) {
 			name:      "empty group member attribute",
 			mutate:    func(config *LDAPConfig) { config.GroupMemberAttribute = "" },
 			errorText: "group member attribute must not be empty",
+		},
+		{
+			name:      "empty allowed group DN",
+			mutate:    func(config *LDAPConfig) { config.AllowedGroupDNs = []string{" "} },
+			errorText: "allowed group DN must not be empty",
 		},
 	}
 

@@ -53,10 +53,11 @@ type ldapConnection interface {
 // LDAPAuthenticator authenticates users by searching for their entry with a
 // service (or anonymous) connection and binding as the returned user DN.
 type LDAPAuthenticator struct {
-	config       hubconfig.LDAPConfig
-	tlsConfig    *tls.Config
-	adminGroupDN *ldap.DN
-	dial         func() (ldapConnection, error)
+	config          hubconfig.LDAPConfig
+	tlsConfig       *tls.Config
+	adminGroupDN    *ldap.DN
+	allowedGroupDNs []*ldap.DN
+	dial            func() (ldapConnection, error)
 }
 
 var directoryAuthenticator DirectoryAuthenticator
@@ -105,11 +106,20 @@ func NewLDAPAuthenticator(config hubconfig.LDAPConfig) (*LDAPAuthenticator, erro
 			return nil, fmt.Errorf("invalid LDAP admin group DN: %w", err)
 		}
 	}
+	allowedGroupDNs := make([]*ldap.DN, 0, len(config.AllowedGroupDNs))
+	for _, groupDN := range config.AllowedGroupDNs {
+		parsedGroupDN, err := ldap.ParseDN(groupDN)
+		if err != nil {
+			return nil, fmt.Errorf("invalid LDAP allowed group DN: %w", err)
+		}
+		allowedGroupDNs = append(allowedGroupDNs, parsedGroupDN)
+	}
 
 	authenticator := &LDAPAuthenticator{
-		config:       config,
-		tlsConfig:    tlsConfig,
-		adminGroupDN: adminGroupDN,
+		config:          config,
+		tlsConfig:       tlsConfig,
+		adminGroupDN:    adminGroupDN,
+		allowedGroupDNs: allowedGroupDNs,
 	}
 	authenticator.dial = func() (ldapConnection, error) {
 		options := []ldap.DialOpt{
@@ -260,6 +270,15 @@ func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password
 	}
 
 	role := ""
+	if len(a.allowedGroupDNs) > 0 {
+		allowed, err := a.isMemberOfAnyGroup(connection, entry)
+		if err != nil {
+			return DirectoryIdentity{}, err
+		}
+		if !allowed {
+			return DirectoryIdentity{}, ErrInvalidCredentials
+		}
+	}
 	if a.adminGroupDN != nil {
 		isAdmin, err := a.isAdmin(connection, entry)
 		if err != nil {
@@ -282,9 +301,26 @@ func (a *LDAPAuthenticator) Authenticate(ctx context.Context, username, password
 }
 
 func (a *LDAPAuthenticator) isAdmin(connection ldapConnection, entry *ldap.Entry) (bool, error) {
+	return a.isMemberOfGroup(connection, entry, a.adminGroupDN)
+}
+
+func (a *LDAPAuthenticator) isMemberOfAnyGroup(connection ldapConnection, entry *ldap.Entry) (bool, error) {
+	for _, groupDN := range a.allowedGroupDNs {
+		member, err := a.isMemberOfGroup(connection, entry, groupDN)
+		if err != nil {
+			return false, err
+		}
+		if member {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (a *LDAPAuthenticator) isMemberOfGroup(connection ldapConnection, entry *ldap.Entry, groupDN *ldap.DN) (bool, error) {
 	for _, memberOf := range entry.GetAttributeValues("memberOf") {
 		memberOfDN, err := ldap.ParseDN(memberOf)
-		if err == nil && a.adminGroupDN.EqualFold(memberOfDN) {
+		if err == nil && groupDN.EqualFold(memberOfDN) {
 			return true, nil
 		}
 	}
@@ -302,7 +338,7 @@ func (a *LDAPAuthenticator) isAdmin(connection ldapConnection, entry *ldap.Entry
 	}
 	groupFilter := fmt.Sprintf("(%s=%s)", a.config.GroupMemberAttribute, ldap.EscapeFilter(memberValue))
 	request := ldap.NewSearchRequest(
-		a.config.AdminGroupDN,
+		groupDN.String(),
 		ldap.ScopeBaseObject,
 		ldap.NeverDerefAliases,
 		1,

@@ -246,6 +246,55 @@ func TestLDAPAuthenticateChecksPosixGroupMemberUID(t *testing.T) {
 	assert.Equal(t, "(memberUid=alice)", connection.searches[1].Filter)
 }
 
+func TestLDAPAuthenticateRequiresAllowedGroupMembership(t *testing.T) {
+	config := testLDAPConfig()
+	config.AllowedGroupDNs = []string{
+		"cn=gads-users,ou=groups,dc=example,dc=com",
+		"cn=gads-qa,ou=groups,dc=example,dc=com",
+	}
+	connection := &fakeLDAPConnection{
+		searchResults: []*ldap.SearchResult{
+			{Entries: []*ldap.Entry{
+				ldap.NewEntry("uid=alice,ou=people,dc=example,dc=com", map[string][]string{"uid": {"alice"}}),
+			}},
+			{Entries: []*ldap.Entry{}},
+		},
+	}
+	connection.searchResults[1] = &ldap.SearchResult{Entries: []*ldap.Entry{ldap.NewEntry(config.AllowedGroupDNs[0], nil)}}
+	authenticator, err := NewLDAPAuthenticator(config)
+	require.NoError(t, err)
+	authenticator.dial = func() (ldapConnection, error) { return connection, nil }
+
+	identity, err := authenticator.Authenticate(context.Background(), "alice", "secret")
+
+	require.NoError(t, err)
+	assert.Equal(t, "alice", identity.Username)
+	assert.Empty(t, identity.Role)
+	assert.Len(t, connection.searches, 2)
+	assert.Equal(t, "(member=uid=alice,ou=people,dc=example,dc=com)", connection.searches[1].Filter)
+}
+
+func TestLDAPAuthenticateRejectsUserOutsideAllowedGroups(t *testing.T) {
+	config := testLDAPConfig()
+	config.AllowedGroupDNs = []string{"cn=gads-users,ou=groups,dc=example,dc=com"}
+	connection := &fakeLDAPConnection{
+		searchResults: []*ldap.SearchResult{
+			{Entries: []*ldap.Entry{
+				ldap.NewEntry("uid=alice,ou=people,dc=example,dc=com", map[string][]string{"uid": {"alice"}}),
+			}},
+			{Entries: []*ldap.Entry{}},
+		},
+	}
+	authenticator, err := NewLDAPAuthenticator(config)
+	require.NoError(t, err)
+	authenticator.dial = func() (ldapConnection, error) { return connection, nil }
+
+	_, err = authenticator.Authenticate(context.Background(), "alice", "secret")
+
+	assert.ErrorIs(t, err, ErrInvalidCredentials)
+	assert.Len(t, connection.binds, 1, "the user bind must not run for a disallowed group")
+}
+
 func TestNewLDAPAuthenticatorRejectsPlaintextByDefault(t *testing.T) {
 	config := testLDAPConfig()
 	config.StartTLS = false

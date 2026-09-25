@@ -50,6 +50,7 @@ Every LDAP setting can be supplied as a command-line flag or through the corresp
 | `--ldap-allow-insecure` | `GADS_LDAP_ALLOW_INSECURE` | `false` | Explicitly allow unencrypted `ldap://` without StartTLS. Unsafe; intended only for isolated development networks. |
 | `--ldap-timeout` | `GADS_LDAP_TIMEOUT` | `5s` | Connection and operation timeout expressed as a Go duration, such as `5s` or `1m`. |
 | `--ldap-admin-group-dn` | `GADS_LDAP_ADMIN_GROUP_DN` | empty | DN of the LDAP group whose members receive the GADS `admin` role. No LDAP user is promoted when omitted. |
+| `--ldap-allowed-group-dn` | `GADS_LDAP_ALLOWED_GROUP_DNS` | empty | Allowlist of groups whose members may log in. Repeat the flag for multiple groups; separate environment values with `;`. If empty, every user found by the LDAP user filter may log in. |
 | `--ldap-group-member-attribute` | `GADS_LDAP_GROUP_MEMBER_ATTRIBUTE` | `member` | Attribute on the admin group containing user DNs, or usernames when using OpenLDAP `posixGroup` (set this to `memberUid`). |
 | `--ldap-auto-provision` | `GADS_LDAP_AUTO_PROVISION` | `true` | Create a MongoDB shadow user on the first successful LDAP login. |
 
@@ -71,6 +72,8 @@ With auto-provisioning enabled, the first successful LDAP login creates a shadow
 LDAP proves the user's identity; MongoDB remains the source of GADS authorization. Administrators can therefore change an LDAP user's workspace assignments without changing the directory. When `--ldap-admin-group-dn` is not configured, an existing shadow user's MongoDB role is preserved and a new shadow user receives the safe default role `user`.
 
 When `--ldap-admin-group-dn` is configured, LDAP group membership is authoritative for the role on every successful LDAP login. GADS accepts the user's `memberOf` value or checks the configured member attribute on the group entry. A member is promoted to `admin`; a user who is no longer a member is demoted to `user`, the shadow record is updated in MongoDB, and the JWT receives the synchronized role. A demoted user without a workspace assignment is added to the default workspace.
+
+When one or more `--ldap-allowed-group-dn` values are configured, a user must be a direct member of at least one listed group to log in. GADS checks the user's `memberOf` values and, when necessary, the configured group member attribute. This supports OpenLDAP `posixGroup` groups with `memberUid`; nested-group expansion is not performed. The allowlist controls login access, while `--ldap-admin-group-dn` controls the `admin` role.
 
 LDAP passwords must be changed in the directory. GADS rejects password-change requests for LDAP-backed users; the existing change-password flow continues to work for local users.
 
