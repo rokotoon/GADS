@@ -53,6 +53,16 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 
 	authEnabled, _ := flags.GetBool("auth")
 	fmt.Printf("Auth enabled: %v. You can enable/disable authentication on hub endpoints with the --auth flag\n", authEnabled)
+	ldapConfig, err := config.LoadLDAPConfig(flags)
+	if err != nil {
+		slog.Error(fmt.Sprintf("Invalid LDAP configuration: %v", err))
+		os.Exit(1)
+	}
+	if err = auth.InitLDAPAuthenticator(ldapConfig); err != nil {
+		slog.Error(fmt.Sprintf("Failed to initialize LDAP authentication: %v", err))
+		os.Exit(1)
+	}
+	fmt.Printf("LDAP authentication enabled: %v\n", ldapConfig.Enabled)
 
 	turnUsernameSuffix, _ := flags.GetString("turn-username-suffix")
 	fmt.Printf("TURN username suffix: %s. You can change it with the --turn-username-suffix flag\n", turnUsernameSuffix)
@@ -99,7 +109,7 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	router.InitGridStore(db.GlobalMongoStore)
 
 	// Update existing devices with new stream type property
-	err := db.GlobalMongoStore.EnsureDevicesHaveStreamType()
+	err = db.GlobalMongoStore.EnsureDevicesHaveStreamType()
 	if err != nil {
 		fmt.Println("Failed updating device stream types " + err.Error())
 	}
@@ -122,6 +132,17 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed adding admin user on start - %s", err))
 		os.Exit(1)
+	}
+
+	// A unique username prevents duplicate shadow profiles when the same LDAP
+	// user performs concurrent first logins.
+	err = db.GlobalMongoStore.CreateUserIndexes()
+	if err != nil {
+		if ldapConfig.Enabled {
+			slog.Error(fmt.Sprintf("Failed to create the unique user index required by LDAP authentication - %s", err))
+			os.Exit(1)
+		}
+		slog.Warn(fmt.Sprintf("Failed to create user indexes - %s", err))
 	}
 
 	// Create database indexes for client credentials

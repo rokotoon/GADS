@@ -12,6 +12,7 @@ package main
 import (
 	"GADS/client/adb"
 	"GADS/hub"
+	hubconfig "GADS/hub/config"
 	"GADS/provider"
 	"embed"
 	"fmt"
@@ -44,6 +45,7 @@ func main() {
 		"\nBy default app will try to use a temp dir on the host, use this flag only if you encounter issues with the temp folder."+
 		"\nAlso you need to have created the folder in advance!")
 	hubCmd.Flags().String("turn-username-suffix", "gads", "Suffix to append to TURN usernames (format: timestamp:suffix)")
+	hubconfig.RegisterLDAPFlags(hubCmd.Flags())
 	rootCmd.AddCommand(hubCmd)
 
 	// Provider Command

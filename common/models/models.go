@@ -34,12 +34,20 @@ type CustomLogger interface {
 	LogPanicf(eventName string, format string, args ...any)
 }
 
+const (
+	AuthSourceLocal = "local"
+	AuthSourceLDAP  = "ldap"
+)
+
+// User records created before auth-source tracking have an empty AuthSource;
+// callers must treat that legacy value as AuthSourceLocal.
 type User struct {
 	Username     string   `json:"username" bson:"username" example:"john_doe"`
 	Password     string   `json:"password" bson:"password,omitempty" example:"secure_password"`
 	Role         string   `json:"role,omitempty" bson:"role" example:"user" enums:"admin,user"`
 	ID           string   `json:"_id" bson:"_id,omitempty" example:"507f1f77bcf86cd799439011"`
 	WorkspaceIDs []string `json:"workspace_ids" bson:"workspace_ids" example:"workspace_id_1,workspace_id_2"`
+	AuthSource   string   `json:"auth_source,omitempty" bson:"auth_source,omitempty" example:"local" enums:"local,ldap"`
 }
 
 type DBDevice struct {

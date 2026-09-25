@@ -20,6 +20,95 @@ Run `./GADS hub` with the following flags:
 
 Then access the hub UI and API on `http://{host-address}:{port}`
 
+## LDAP authentication
+
+GADS can authenticate users against OpenLDAP and compatible LDAPv3 directories. LDAP authentication is optional and disabled by default. When it is enabled, GADS uses a hybrid account model:
+
+- Local accounts continue to authenticate with their password stored in MongoDB. The built-in local `admin` account remains available as a break-glass account.
+- LDAP accounts authenticate against the directory. GADS never copies or stores their LDAP password.
+- Every LDAP identity has a shadow user record in MongoDB. GADS uses that record for its role and workspace assignments, while LDAP remains the source of authentication.
+- An account uses exactly one authentication source. A failed LDAP bind never falls back to a same-named local account, and an existing local account cannot be taken over by LDAP.
+
+The existing login page and `/authenticate` API are used for both account types.
+
+### LDAP settings
+
+Every LDAP setting can be supplied as a command-line flag or through the corresponding environment variable. An explicitly supplied flag takes precedence over the environment variable, which takes precedence over the default.
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--ldap-enabled` | `GADS_LDAP_ENABLED` | `false` | Enable LDAP authentication in addition to local authentication. |
+| `--ldap-url` | `GADS_LDAP_URL` | empty | LDAP server URL, for example `ldaps://ldap.example.com:636` or `ldap://ldap.example.com:389`. Required when LDAP is enabled. |
+| `--ldap-base-dn` | `GADS_LDAP_BASE_DN` | empty | Base DN used to search for users, for example `ou=people,dc=example,dc=com`. |
+| `--ldap-bind-dn` | `GADS_LDAP_BIND_DN` | empty | DN of the service account used to search for users and groups. Leave empty only if the directory permits anonymous searches. |
+| `--ldap-bind-password` | `GADS_LDAP_BIND_PASSWORD` | empty | Service-account password, required when a bind DN is set. Prefer the environment variable so the secret is not exposed in the process command line. |
+| `--ldap-user-filter` | `GADS_LDAP_USER_FILTER` | `(&(objectClass=person)(uid={username}))` | LDAP user search filter. `{username}` is replaced with the safely escaped login name. |
+| `--ldap-username-attribute` | `GADS_LDAP_USERNAME_ATTRIBUTE` | `uid` | Attribute used as the canonical GADS username. |
+| `--ldap-start-tls` | `GADS_LDAP_START_TLS` | `false` | Upgrade an `ldap://` connection with StartTLS before sending credentials. |
+| `--ldap-ca-cert-file` | `GADS_LDAP_CA_CERT_FILE` | empty | PEM file containing the CA certificate used to verify the LDAP server. The system trust store is used when omitted. |
+| `--ldap-insecure-skip-verify` | `GADS_LDAP_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate verification. Unsafe; use only for temporary troubleshooting. |
+| `--ldap-allow-insecure` | `GADS_LDAP_ALLOW_INSECURE` | `false` | Explicitly allow unencrypted `ldap://` without StartTLS. Unsafe; intended only for isolated development networks. |
+| `--ldap-timeout` | `GADS_LDAP_TIMEOUT` | `5s` | Connection and operation timeout expressed as a Go duration, such as `5s` or `1m`. |
+| `--ldap-admin-group-dn` | `GADS_LDAP_ADMIN_GROUP_DN` | empty | DN of the LDAP group whose members receive the GADS `admin` role. No LDAP user is promoted when omitted. |
+| `--ldap-group-member-attribute` | `GADS_LDAP_GROUP_MEMBER_ATTRIBUTE` | `member` | Attribute on the admin group containing user DNs, or usernames when using OpenLDAP `posixGroup` (set this to `memberUid`). |
+| `--ldap-auto-provision` | `GADS_LDAP_AUTO_PROVISION` | `true` | Create a MongoDB shadow user on the first successful LDAP login. |
+
+Boolean environment variables accept `true` or `false`. A bind DN and bind password must be supplied together. StartTLS is valid only with an `ldap://` URL; `ldaps://` already establishes TLS when connecting. Do not place `GADS_LDAP_BIND_PASSWORD` in source control, container images, or service unit files readable by untrusted users. The bind password is not written to GADS logs.
+
+### User provisioning and authorization
+
+With auto-provisioning enabled, the first successful LDAP login creates a shadow user with the canonical value of `--ldap-username-attribute`. A new non-admin user is assigned to the default workspace immediately. With auto-provisioning disabled, an administrator must create the LDAP shadow user through `POST /admin/user` before that user can sign in. Use the canonical LDAP username, omit the password, and set the authentication source explicitly:
+
+```json
+{
+  "username": "alice",
+  "role": "user",
+  "workspace_ids": ["workspace-id"],
+  "auth_source": "ldap"
+}
+```
+
+LDAP proves the user's identity; MongoDB remains the source of GADS authorization. Administrators can therefore change an LDAP user's workspace assignments without changing the directory. When `--ldap-admin-group-dn` is not configured, an existing shadow user's MongoDB role is preserved and a new shadow user receives the safe default role `user`.
+
+When `--ldap-admin-group-dn` is configured, LDAP group membership is authoritative for the role on every successful LDAP login. GADS accepts the user's `memberOf` value or checks the configured member attribute on the group entry. A member is promoted to `admin`; a user who is no longer a member is demoted to `user`, the shadow record is updated in MongoDB, and the JWT receives the synchronized role. A demoted user without a workspace assignment is added to the default workspace.
+
+LDAP passwords must be changed in the directory. GADS rejects password-change requests for LDAP-backed users; the existing change-password flow continues to work for local users.
+
+### Secure LDAPS example
+
+Use `ldaps://` and a trusted CA certificate for a direct TLS connection. Supply the service-account secret through the environment rather than `--ldap-bind-password`:
+
+```bash
+export GADS_LDAP_BIND_PASSWORD='replace-with-a-secret'
+
+./GADS hub --port=10000 \
+  --ldap-enabled=true \
+  --ldap-url='ldaps://ldap.example.com:636' \
+  --ldap-base-dn='ou=people,dc=example,dc=com' \
+  --ldap-bind-dn='cn=gads,ou=service-accounts,dc=example,dc=com' \
+  --ldap-ca-cert-file='/etc/gads/certs/openldap-ca.pem' \
+  --ldap-user-filter='(&(objectClass=person)(uid={username}))' \
+  --ldap-admin-group-dn='cn=gads-admins,ou=groups,dc=example,dc=com'
+```
+
+### Secure StartTLS example
+
+For an LDAP endpoint on port 389, enable StartTLS. This begins with `ldap://` but negotiates TLS before the bind or any password is sent:
+
+```bash
+export GADS_LDAP_BIND_PASSWORD='replace-with-a-secret'
+
+./GADS hub --port=10000 \
+  --ldap-enabled=true \
+  --ldap-url='ldap://ldap.example.com:389' \
+  --ldap-start-tls=true \
+  --ldap-base-dn='ou=people,dc=example,dc=com' \
+  --ldap-bind-dn='cn=gads,ou=service-accounts,dc=example,dc=com' \
+  --ldap-ca-cert-file='/etc/gads/certs/openldap-ca.pem'
+```
+
+Plain `ldap://` without StartTLS is rejected unless `--ldap-allow-insecure=true` (or `GADS_LDAP_ALLOW_INSECURE=true`) is set explicitly. Unencrypted LDAP exposes user and service-account credentials to anyone able to observe the connection; do not enable it in production. Likewise, `--ldap-insecure-skip-verify=true` encrypts traffic but does not authenticate the server and is not a safe substitute for installing the correct CA certificate.
+
 ## UI development
 
 If you want to work on the React UI with hot reload you need to add a proxy in `package.json` to point to the Go backend
@@ -33,8 +122,9 @@ If you want to work on the React UI with hot reload you need to add a proxy in `
 
 ### Users administration
 
-You can add/delete users and change their roles/passwords via the `Admin` panel.  
-There are no limitations on usernames and passwords - only the default `admin` user cannot be deleted and its role changed(you can change its password though)
+You can add/delete users and change their roles/passwords via the `Admin` panel. LDAP-backed users are represented by shadow records so their roles and workspace assignments can be managed in GADS, but their passwords remain directory-managed and cannot be changed in GADS.
+
+Only the default local `admin` user cannot be deleted or have its role changed (you can change its local password).
 
 ### Providers administration
 

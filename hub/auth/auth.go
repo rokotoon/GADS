@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -123,13 +124,14 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	user, err := db.GlobalMongoStore.GetUser(creds.Username)
-	if err != nil {
+	user, err := authenticateCredentials(c.Request.Context(), db.GlobalMongoStore, getDirectoryAuthenticator(), creds)
+	if errors.Is(err, ErrInvalidCredentials) {
 		api.Unauthorized(c, "Invalid credentials")
 		return
 	}
-	if user.Password != creds.Password {
-		api.Unauthorized(c, "Invalid credentials")
+	if err != nil {
+		slog.Error("Authentication backend failed", "username", creds.Username, "error", err)
+		api.InternalError(c, "Authentication service unavailable")
 		return
 	}
 
@@ -245,6 +247,10 @@ func ChangePasswordHandler(c *gin.Context) {
 	user, err := db.GlobalMongoStore.GetUser(username)
 	if err != nil {
 		api.InternalError(c, "Failed to load user")
+		return
+	}
+	if user.AuthSource == models.AuthSourceLDAP {
+		api.BadRequest(c, "Password changes for LDAP users must be performed in the directory")
 		return
 	}
 

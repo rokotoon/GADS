@@ -52,6 +52,7 @@ The platform architecture consists of two main components:
   - Admin user management
   - Origin-based secret key management
   - Multiple JWT provider support
+  - Hybrid local and OpenLDAP authentication ([Hub LDAP setup](./docs/hub.md#ldap-authentication))
   - OAuth2 client credentials for Appium (requires `gads:clientSecret` capability)
   - [Detailed Secret Keys Documentation](./docs/secret-keys.md)
   - [Appium Credentials Documentation](./docs/appium-credentials.md)

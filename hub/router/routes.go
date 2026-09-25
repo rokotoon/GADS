@@ -171,9 +171,24 @@ func AddUser(c *gin.Context) {
 		return
 	}
 
-	if user.Username == "" || user.Password == "" || (user.Role == "user" && len(user.WorkspaceIDs) == 0) {
+	if user.AuthSource == "" {
+		user.AuthSource = models.AuthSourceLocal
+	}
+	if user.AuthSource != models.AuthSourceLocal && user.AuthSource != models.AuthSourceLDAP {
+		api.BadRequest(c, "Invalid auth source - `local` and `ldap` are the accepted values")
+		return
+	}
+
+	if user.Username == "" || (user.Role == "user" && len(user.WorkspaceIDs) == 0) {
 		api.BadRequest(c, "Empty or invalid body")
 		return
+	}
+	if user.AuthSource == models.AuthSourceLocal && user.Password == "" {
+		api.BadRequest(c, "Password is required for local users")
+		return
+	}
+	if user.AuthSource == models.AuthSourceLDAP {
+		user.Password = ""
 	}
 
 	if user.Role != "admin" && user.Role != "user" {
@@ -242,6 +257,32 @@ func UpdateUser(c *gin.Context) {
 	if dbUser.Username == "" {
 		api.BadRequest(c, "Cannot update non-existing user")
 		return
+	}
+
+	currentAuthSource := dbUser.AuthSource
+	if currentAuthSource == "" {
+		currentAuthSource = models.AuthSourceLocal
+	}
+	if currentAuthSource != models.AuthSourceLocal && currentAuthSource != models.AuthSourceLDAP {
+		api.InternalError(c, "User has an invalid auth source")
+		return
+	}
+	if user.AuthSource != "" && user.AuthSource != models.AuthSourceLocal && user.AuthSource != models.AuthSourceLDAP {
+		api.BadRequest(c, "Invalid auth source - `local` and `ldap` are the accepted values")
+		return
+	}
+	if user.AuthSource != "" && user.AuthSource != currentAuthSource {
+		api.BadRequest(c, "User auth source cannot be changed")
+		return
+	}
+	user.AuthSource = currentAuthSource
+
+	if currentAuthSource == models.AuthSourceLDAP {
+		if user.Password != "" {
+			api.BadRequest(c, "Password cannot be set for LDAP users")
+			return
+		}
+		user.Password = ""
 	}
 
 	err = db.GlobalMongoStore.AddOrUpdateUser(user)
@@ -1620,6 +1661,9 @@ func GetUsers(c *gin.Context) {
 	// Clean up the passwords, not that the project is very secure but let's not send them
 	for i := range users {
 		users[i].Password = ""
+		if users[i].AuthSource == "" {
+			users[i].AuthSource = models.AuthSourceLocal
+		}
 	}
 
 	api.OK(c, "Successfully retrieved users data", users)
