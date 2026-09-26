@@ -32,6 +32,7 @@ func HandleRequests(uiFiles fs.FS) *gin.Engine {
 
 	// Add Swagger route
 	r.GET("/swagger/*any", ginSwagger.WrapHandler(swaggerFiles.Handler))
+	registerUIOverrides(r)
 
 	ginConfig := cors.DefaultConfig()
 	ginConfig.AllowAllOrigins = true
@@ -87,13 +88,12 @@ func HandleRequests(uiFiles fs.FS) *gin.Engine {
 		}
 		defer indexFile.Close()
 
-		stat, err := indexFile.Stat()
+		index, err := io.ReadAll(indexFile)
 		if err != nil {
 			c.AbortWithStatus(http.StatusInternalServerError)
 			return
 		}
-
-		http.ServeContent(c.Writer, c.Request, "index.html", stat.ModTime(), indexFile.(io.ReadSeeker))
+		c.Data(http.StatusOK, "text/html; charset=utf-8", injectUIOverrides(index))
 	})
 
 	authGroup := r.Group("/")

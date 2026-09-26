@@ -20,6 +20,8 @@ Run `./GADS hub` with the following flags:
 
 Then access the hub UI and API on `http://{host-address}:{port}`
 
+The hub applies a small runtime UI override to the embedded interface. It removes the donation, GitHub, and Discord header links without requiring access to the private `hub-ui` source repository. The override is applied when the UI build is embedded with the `ui` build tag.
+
 ## LDAP authentication
 
 GADS can authenticate users against OpenLDAP and compatible LDAPv3 directories. LDAP authentication is optional and disabled by default. When it is enabled, GADS uses a hybrid account model:
