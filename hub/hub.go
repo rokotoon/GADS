@@ -53,6 +53,31 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 
 	authEnabled, _ := flags.GetBool("auth")
 	fmt.Printf("Auth enabled: %v. You can enable/disable authentication on hub endpoints with the --auth flag\n", authEnabled)
+	ldapConfig, err := config.LoadLDAPConfig(flags)
+	if err != nil {
+		slog.Error(fmt.Sprintf("Invalid LDAP configuration: %v", err))
+		os.Exit(1)
+	}
+	if err = auth.InitLDAPAuthenticator(ldapConfig); err != nil {
+		slog.Error(fmt.Sprintf("Failed to initialize LDAP authentication: %v", err))
+		os.Exit(1)
+	}
+	fmt.Printf("LDAP authentication enabled: %v\n", ldapConfig.Enabled)
+
+	// Every request slides a session forward, so the TTL acts as an inactivity
+	// timeout and the max session age as the hard limit on a user session
+	tokenTTL, _ := flags.GetDuration("token-ttl")
+	maxSessionAge, _ := flags.GetDuration("max-session-age")
+	auth.SetTokenLifetimes(tokenTTL, maxSessionAge)
+	if authEnabled {
+		fmt.Printf("Authentication sessions expire after %s without being used. You can change this with the --token-ttl flag\n", auth.TokenTTL())
+		if auth.MaxSessionAge() > 0 {
+			fmt.Printf("User sessions have to authenticate again after %s no matter how much they are used. You can change this with the --max-session-age flag\n", auth.MaxSessionAge())
+		} else {
+			fmt.Println("User sessions have no absolute lifetime limit - they live on as long as they keep being used")
+		}
+		fmt.Println("Sessions are kept in memory - restarting the hub ends all of them and everyone has to authenticate again")
+	}
 
 	turnUsernameSuffix, _ := flags.GetString("turn-username-suffix")
 	fmt.Printf("TURN username suffix: %s. You can change it with the --turn-username-suffix flag\n", turnUsernameSuffix)
@@ -99,7 +124,7 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	router.InitGridStore(db.GlobalMongoStore)
 
 	// Update existing devices with new stream type property
-	err := db.GlobalMongoStore.EnsureDevicesHaveStreamType()
+	err = db.GlobalMongoStore.EnsureDevicesHaveStreamType()
 	if err != nil {
 		fmt.Println("Failed updating device stream types " + err.Error())
 	}
@@ -117,11 +142,24 @@ func StartHub(flags *pflag.FlagSet, appVersion string, uiFiles fs.FS, resourceFi
 	go devices.GetLatestDBDevices()
 	// Start a goroutine to clean hanging grid sessions
 	go router.UpdateExpiredGridSessions()
+	// Start a goroutine to drop authentication sessions nobody uses anymore
+	go auth.SweepExpiredSessions()
 
 	err = db.GlobalMongoStore.AddAdminUserIfMissing()
 	if err != nil {
 		slog.Error(fmt.Sprintf("Failed adding admin user on start - %s", err))
 		os.Exit(1)
+	}
+
+	// A unique username prevents duplicate shadow profiles when the same LDAP
+	// user performs concurrent first logins.
+	err = db.GlobalMongoStore.CreateUserIndexes()
+	if err != nil {
+		if ldapConfig.Enabled {
+			slog.Error(fmt.Sprintf("Failed to create the unique user index required by LDAP authentication - %s", err))
+			os.Exit(1)
+		}
+		slog.Warn(fmt.Sprintf("Failed to create user indexes - %s", err))
 	}
 
 	// Create database indexes for client credentials

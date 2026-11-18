@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/url"
 	"strings"
 	"time"
@@ -123,13 +124,14 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	user, err := db.GlobalMongoStore.GetUser(creds.Username)
-	if err != nil {
+	user, err := authenticateCredentials(c.Request.Context(), db.GlobalMongoStore, getDirectoryAuthenticator(), creds)
+	if errors.Is(err, ErrInvalidCredentials) {
 		api.Unauthorized(c, "Invalid credentials")
 		return
 	}
-	if user.Password != creds.Password {
-		api.Unauthorized(c, "Invalid credentials")
+	if err != nil {
+		slog.Error("Authentication backend failed", "username", creds.Username, "error", err)
+		api.InternalError(c, "Authentication service unavailable")
 		return
 	}
 
@@ -149,8 +151,10 @@ func LoginHandler(c *gin.Context) {
 		return
 	}
 
-	// Generate JWT token with 1 hour validity
-	token, err := GenerateJWT(user.Username, user.Role, defaultTenant, scopes, time.Hour, origin)
+	// Start a session and generate the token for it. Every request slides the
+	// session forward, so the reported validity is an inactivity window rather
+	// than a limit on how long the client can keep working
+	token, err := GenerateJWT(user.Username, user.Role, defaultTenant, scopes, origin)
 	if err != nil {
 		api.InternalError(c, "Failed to generate token")
 		return
@@ -160,7 +164,7 @@ func LoginHandler(c *gin.Context) {
 	api.OK(c, "", models.AuthResponse{
 		AccessToken: token,
 		TokenType:   "Bearer",
-		ExpiresIn:   3600, // 1 hour in seconds
+		ExpiresIn:   int(TokenTTL().Seconds()),
 		Username:    user.Username,
 		Role:        user.Role,
 	})
@@ -168,7 +172,7 @@ func LoginHandler(c *gin.Context) {
 
 // LogoutHandler godoc
 // @Summary      User logout
-// @Description  Logout user (for JWT tokens, client should discard the token)
+// @Description  Ends the session behind the token, which makes the token stop working
 // @Tags         Hub - Authentication
 // @Accept       json
 // @Produce      json
@@ -180,8 +184,12 @@ func LogoutHandler(c *gin.Context) {
 	// Check if there's a bearer token
 	authHeader := c.GetHeader("Authorization")
 	if strings.HasPrefix(authHeader, "Bearer ") {
-		// For JWT tokens, we don't need to do anything on the server
-		// The client should discard the token
+		// Dropping the session is what actually ends the login - the token is
+		// refused from here on even though it is still correctly signed
+		if claims, err := GetClaimsFromRequest(c); err == nil && claims.SessionID != "" {
+			DeleteSession(claims.SessionID)
+		}
+
 		api.OKMessage(c, "success")
 		return
 	}
@@ -245,6 +253,10 @@ func ChangePasswordHandler(c *gin.Context) {
 	user, err := db.GlobalMongoStore.GetUser(username)
 	if err != nil {
 		api.InternalError(c, "Failed to load user")
+		return
+	}
+	if user.AuthSource == models.AuthSourceLDAP {
+		api.BadRequest(c, "Password changes for LDAP users must be performed in the directory")
 		return
 	}
 
@@ -375,6 +387,10 @@ func GetUserInfoHandler(c *gin.Context) {
 // "token" query parameter, validates it against the request origin, and returns
 // the parsed claims. The query parameter may arrive with or without a "Bearer "
 // prefix (e.g. from WebSocket URLs) — both forms are handled.
+//
+// For tokens the hub issued this is also where the session behind the token is
+// checked and slid forward, so every endpoint resolving claims from a request
+// keeps the session alive and refuses a token whose session is gone.
 func GetClaimsFromRequest(c *gin.Context) (*JWTClaims, error) {
 	var tokenString string
 
@@ -397,7 +413,20 @@ func GetClaimsFromRequest(c *gin.Context) (*JWTClaims, error) {
 	}
 
 	origin := GetOriginFromRequest(c)
-	return ValidateJWT(tokenString, origin)
+	claims, err := ValidateJWT(tokenString, origin)
+	if err != nil {
+		return nil, err
+	}
+
+	// Tokens from another issuer are not backed by a session - they are valid
+	// for as long as their own expiry says
+	if claims.Issuer == TokenIssuer {
+		if _, err := TouchSession(claims.SessionID); err != nil {
+			return nil, err
+		}
+	}
+
+	return claims, nil
 }
 
 func AuthMiddleware() gin.HandlerFunc {

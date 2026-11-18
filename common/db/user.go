@@ -15,6 +15,7 @@ import (
 
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
 func (m *MongoStore) GetUser(username string) (models.User, error) {
@@ -31,7 +32,28 @@ func (m *MongoStore) GetUsers() ([]models.User, error) {
 func (m *MongoStore) AddOrUpdateUser(user models.User) error {
 	coll := m.GetCollection("users")
 	filter := bson.D{{Key: "username", Value: user.Username}}
+	if user.AuthSource == models.AuthSourceLDAP {
+		// LDAP credentials are verified by the directory and must never be stored
+		// in the local user document, including records created by non-HTTP callers.
+		user.Password = ""
+		update := bson.M{
+			"$set":   user,
+			"$unset": bson.M{"password": ""},
+		}
+		_, err := coll.UpdateOne(m.Ctx, filter, update, options.Update().SetUpsert(true))
+		return err
+	}
 	return UpsertDocument[models.User](m.Ctx, coll, filter, user)
+}
+
+// CreateUserIndexes creates the indexes needed to keep user identities unique.
+func (m *MongoStore) CreateUserIndexes() error {
+	coll := m.GetCollection("users")
+	_, err := coll.Indexes().CreateOne(m.Ctx, mongo.IndexModel{
+		Keys:    bson.D{{Key: "username", Value: 1}},
+		Options: options.Index().SetUnique(true),
+	})
+	return err
 }
 
 func (m *MongoStore) DeleteUser(nickname string) error {
@@ -50,7 +72,7 @@ func (m *MongoStore) AddAdminUserIfMissing() error {
 		return nil // User exists
 	}
 
-	err = GlobalMongoStore.AddOrUpdateUser(models.User{Username: "admin", Password: "password", Role: "admin"})
+	err = GlobalMongoStore.AddOrUpdateUser(models.User{Username: "admin", Password: "password", Role: "admin", AuthSource: models.AuthSourceLocal})
 	if err != nil {
 		return fmt.Errorf("Failed to add/update admin user - %s", err)
 	}

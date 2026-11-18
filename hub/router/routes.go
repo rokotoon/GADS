@@ -171,9 +171,24 @@ func AddUser(c *gin.Context) {
 		return
 	}
 
-	if user.Username == "" || user.Password == "" || (user.Role == "user" && len(user.WorkspaceIDs) == 0) {
+	if user.AuthSource == "" {
+		user.AuthSource = models.AuthSourceLocal
+	}
+	if user.AuthSource != models.AuthSourceLocal && user.AuthSource != models.AuthSourceLDAP {
+		api.BadRequest(c, "Invalid auth source - `local` and `ldap` are the accepted values")
+		return
+	}
+
+	if user.Username == "" || (user.Role == "user" && len(user.WorkspaceIDs) == 0) {
 		api.BadRequest(c, "Empty or invalid body")
 		return
+	}
+	if user.AuthSource == models.AuthSourceLocal && user.Password == "" {
+		api.BadRequest(c, "Password is required for local users")
+		return
+	}
+	if user.AuthSource == models.AuthSourceLDAP {
+		user.Password = ""
 	}
 
 	if user.Role != "admin" && user.Role != "user" {
@@ -242,6 +257,32 @@ func UpdateUser(c *gin.Context) {
 	if dbUser.Username == "" {
 		api.BadRequest(c, "Cannot update non-existing user")
 		return
+	}
+
+	currentAuthSource := dbUser.AuthSource
+	if currentAuthSource == "" {
+		currentAuthSource = models.AuthSourceLocal
+	}
+	if currentAuthSource != models.AuthSourceLocal && currentAuthSource != models.AuthSourceLDAP {
+		api.InternalError(c, "User has an invalid auth source")
+		return
+	}
+	if user.AuthSource != "" && user.AuthSource != models.AuthSourceLocal && user.AuthSource != models.AuthSourceLDAP {
+		api.BadRequest(c, "Invalid auth source - `local` and `ldap` are the accepted values")
+		return
+	}
+	if user.AuthSource != "" && user.AuthSource != currentAuthSource {
+		api.BadRequest(c, "User auth source cannot be changed")
+		return
+	}
+	user.AuthSource = currentAuthSource
+
+	if currentAuthSource == models.AuthSourceLDAP {
+		if user.Password != "" {
+			api.BadRequest(c, "Password cannot be set for LDAP users")
+			return
+		}
+		user.Password = ""
 	}
 
 	err = db.GlobalMongoStore.AddOrUpdateUser(user)
@@ -594,6 +635,11 @@ func DeviceInUseWS(c *gin.Context) {
 		device.Mu.Lock()
 		device.RefreshLock()
 		device.Mu.Unlock()
+		// Holding a device in the UI counts as using the hub - without this the
+		// user's session could go idle while they sit on the device control page,
+		// which makes no requests of its own. The 30 minute inactivity check
+		// above still ends a session nobody is actually working in
+		auth.TouchSession(claims.SessionID) //nolint:errcheck — the session going away just means the next request gets a 401
 	}
 }
 
@@ -1620,6 +1666,9 @@ func GetUsers(c *gin.Context) {
 	// Clean up the passwords, not that the project is very secure but let's not send them
 	for i := range users {
 		users[i].Password = ""
+		if users[i].AuthSource == "" {
+			users[i].AuthSource = models.AuthSourceLocal
+		}
 	}
 
 	api.OK(c, "Successfully retrieved users data", users)
@@ -1811,6 +1860,12 @@ func UpdateTURNConfig(c *gin.Context) {
 			return
 		}
 
+		// TLS port is optional: 0 (or empty) disables TURN over TLS (turns:).
+		if config.TLSPort < 0 || config.TLSPort > 65535 {
+			api.BadRequest(c, "TLS port must be between 0 and 65535 (0 disables TLS)")
+			return
+		}
+
 		if config.SharedSecret == "" {
 			api.BadRequest(c, "Shared secret is required when TURN is enabled")
 			return
@@ -1820,6 +1875,7 @@ func UpdateTURNConfig(c *gin.Context) {
 		if config.TTL == 0 {
 			config.TTL = 3600 // Default: 1 hour
 		}
+		// TLS port is intentionally NOT defaulted — leaving it 0 keeps TURN over TLS disabled.
 	}
 
 	err := db.GlobalMongoStore.UpdateTURNConfig(config)

@@ -17,8 +17,102 @@ Run `./GADS hub` with the following flags:
 - `--auth=` - enable/disable authentication. When disabled you can access any UI page/hub endpoint without login token validation, note that this is **highly insecure** and should be used only for development - `true/false`
 - `--mongo-db=` - IP address and port of the MongoDB instance, e.g `192.168.1.6:27017` (default is `localhost:27017`) - tested only on local network
 - `--files-dir=` - directory where the UI static files will be unpacked and served from. By default the app tries to use a temporary folder available on the host automatically. **NB** Use this flag only if you have issues with the default behaviour.
+- `--token-ttl=` - how long an authentication session survives without being used, e.g. `30m`, `2h` (default `1h`). Every request slides it forward, so this is an inactivity timeout - see [Authentication sessions](#authentication-sessions)
+- `--max-session-age=` - maximum total lifetime of a user session no matter how much it is used (default `24h`, use `0` for no limit). Sessions from the OAuth2 client credentials flow are not affected
 
 Then access the hub UI and API on `http://{host-address}:{port}`
+
+## LDAP authentication
+
+GADS can authenticate users against OpenLDAP and compatible LDAPv3 directories. LDAP authentication is optional and disabled by default. When it is enabled, GADS uses a hybrid account model:
+
+- Local accounts continue to authenticate with their password stored in MongoDB. The built-in local `admin` account remains available as a break-glass account.
+- LDAP accounts authenticate against the directory. GADS never copies or stores their LDAP password.
+- Every LDAP identity has a shadow user record in MongoDB. GADS uses that record for its role and workspace assignments, while LDAP remains the source of authentication.
+- An account uses exactly one authentication source. A failed LDAP bind never falls back to a same-named local account, and an existing local account cannot be taken over by LDAP.
+
+The existing login page and `/authenticate` API are used for both account types.
+
+### LDAP settings
+
+Every LDAP setting can be supplied as a command-line flag or through the corresponding environment variable. An explicitly supplied flag takes precedence over the environment variable, which takes precedence over the default.
+
+| Flag | Environment variable | Default | Description |
+| --- | --- | --- | --- |
+| `--ldap-enabled` | `GADS_LDAP_ENABLED` | `false` | Enable LDAP authentication in addition to local authentication. |
+| `--ldap-url` | `GADS_LDAP_URL` | empty | LDAP server URL, for example `ldaps://ldap.example.com:636` or `ldap://ldap.example.com:389`. Required when LDAP is enabled. |
+| `--ldap-base-dn` | `GADS_LDAP_BASE_DN` | empty | Base DN used to search for users, for example `ou=people,dc=example,dc=com`. |
+| `--ldap-bind-dn` | `GADS_LDAP_BIND_DN` | empty | DN of the service account used to search for users and groups. Leave empty only if the directory permits anonymous searches. |
+| `--ldap-bind-password` | `GADS_LDAP_BIND_PASSWORD` | empty | Service-account password, required when a bind DN is set. Prefer the environment variable so the secret is not exposed in the process command line. |
+| `--ldap-user-filter` | `GADS_LDAP_USER_FILTER` | `(&(objectClass=person)(uid={username}))` | LDAP user search filter. `{username}` is replaced with the safely escaped login name. |
+| `--ldap-username-attribute` | `GADS_LDAP_USERNAME_ATTRIBUTE` | `uid` | Attribute used as the canonical GADS username. |
+| `--ldap-start-tls` | `GADS_LDAP_START_TLS` | `false` | Upgrade an `ldap://` connection with StartTLS before sending credentials. |
+| `--ldap-ca-cert-file` | `GADS_LDAP_CA_CERT_FILE` | empty | PEM file containing the CA certificate used to verify the LDAP server. The system trust store is used when omitted. |
+| `--ldap-insecure-skip-verify` | `GADS_LDAP_INSECURE_SKIP_VERIFY` | `false` | Disable TLS certificate verification. Unsafe; use only for temporary troubleshooting. |
+| `--ldap-allow-insecure` | `GADS_LDAP_ALLOW_INSECURE` | `false` | Explicitly allow unencrypted `ldap://` without StartTLS. Unsafe; intended only for isolated development networks. |
+| `--ldap-timeout` | `GADS_LDAP_TIMEOUT` | `5s` | Connection and operation timeout expressed as a Go duration, such as `5s` or `1m`. |
+| `--ldap-admin-group-dn` | `GADS_LDAP_ADMIN_GROUP_DN` | empty | DN of the LDAP group whose members receive the GADS `admin` role. No LDAP user is promoted when omitted. |
+| `--ldap-allowed-group-dn` | `GADS_LDAP_ALLOWED_GROUP_DNS` | empty | Allowlist of groups whose members may log in. Repeat the flag for multiple groups; separate environment values with `;`. If empty, every user found by the LDAP user filter may log in. |
+| `--ldap-group-member-attribute` | `GADS_LDAP_GROUP_MEMBER_ATTRIBUTE` | `member` | Attribute on the admin group containing user DNs, or usernames when using OpenLDAP `posixGroup` (set this to `memberUid`). |
+| `--ldap-auto-provision` | `GADS_LDAP_AUTO_PROVISION` | `true` | Create a MongoDB shadow user on the first successful LDAP login. |
+
+Boolean environment variables accept `true` or `false`. A bind DN and bind password must be supplied together. StartTLS is valid only with an `ldap://` URL; `ldaps://` already establishes TLS when connecting. Do not place `GADS_LDAP_BIND_PASSWORD` in source control, container images, or service unit files readable by untrusted users. The bind password is not written to GADS logs.
+
+### User provisioning and authorization
+
+With auto-provisioning enabled, the first successful LDAP login creates a shadow user with the canonical value of `--ldap-username-attribute`. A new non-admin user is assigned to the default workspace immediately. With auto-provisioning disabled, an administrator must create the LDAP shadow user through `POST /admin/user` before that user can sign in. Use the canonical LDAP username, omit the password, and set the authentication source explicitly:
+
+```json
+{
+  "username": "alice",
+  "role": "user",
+  "workspace_ids": ["workspace-id"],
+  "auth_source": "ldap"
+}
+```
+
+LDAP proves the user's identity; MongoDB remains the source of GADS authorization. Administrators can therefore change an LDAP user's workspace assignments without changing the directory. When `--ldap-admin-group-dn` is not configured, an existing shadow user's MongoDB role is preserved and a new shadow user receives the safe default role `user`.
+
+When `--ldap-admin-group-dn` is configured, LDAP group membership is authoritative for the role on every successful LDAP login. GADS accepts the user's `memberOf` value or checks the configured member attribute on the group entry. A member is promoted to `admin`; a user who is no longer a member is demoted to `user`, the shadow record is updated in MongoDB, and the JWT receives the synchronized role. A demoted user without a workspace assignment is added to the default workspace.
+
+When one or more `--ldap-allowed-group-dn` values are configured, a user must be a direct member of at least one listed group to log in. GADS checks the user's `memberOf` values and, when necessary, the configured group member attribute. This supports OpenLDAP `posixGroup` groups with `memberUid`; nested-group expansion is not performed. The allowlist controls login access, while `--ldap-admin-group-dn` controls the `admin` role.
+
+LDAP passwords must be changed in the directory. GADS rejects password-change requests for LDAP-backed users; the existing change-password flow continues to work for local users.
+
+### Secure LDAPS example
+
+Use `ldaps://` and a trusted CA certificate for a direct TLS connection. Supply the service-account secret through the environment rather than `--ldap-bind-password`:
+
+```bash
+export GADS_LDAP_BIND_PASSWORD='replace-with-a-secret'
+
+./GADS hub --port=10000 \
+  --ldap-enabled=true \
+  --ldap-url='ldaps://ldap.example.com:636' \
+  --ldap-base-dn='ou=people,dc=example,dc=com' \
+  --ldap-bind-dn='cn=gads,ou=service-accounts,dc=example,dc=com' \
+  --ldap-ca-cert-file='/etc/gads/certs/openldap-ca.pem' \
+  --ldap-user-filter='(&(objectClass=person)(uid={username}))' \
+  --ldap-admin-group-dn='cn=gads-admins,ou=groups,dc=example,dc=com'
+```
+
+### Secure StartTLS example
+
+For an LDAP endpoint on port 389, enable StartTLS. This begins with `ldap://` but negotiates TLS before the bind or any password is sent:
+
+```bash
+export GADS_LDAP_BIND_PASSWORD='replace-with-a-secret'
+
+./GADS hub --port=10000 \
+  --ldap-enabled=true \
+  --ldap-url='ldap://ldap.example.com:389' \
+  --ldap-start-tls=true \
+  --ldap-base-dn='ou=people,dc=example,dc=com' \
+  --ldap-bind-dn='cn=gads,ou=service-accounts,dc=example,dc=com' \
+  --ldap-ca-cert-file='/etc/gads/certs/openldap-ca.pem'
+```
+
+Plain `ldap://` without StartTLS is rejected unless `--ldap-allow-insecure=true` (or `GADS_LDAP_ALLOW_INSECURE=true`) is set explicitly. Unencrypted LDAP exposes user and service-account credentials to anyone able to observe the connection; do not enable it in production. Likewise, `--ldap-insecure-skip-verify=true` encrypts traffic but does not authenticate the server and is not a safe substitute for installing the correct CA certificate.
 
 ## UI development
 
@@ -31,10 +125,30 @@ If you want to work on the React UI with hot reload you need to add a proxy in `
 
 ## Additional notes
 
+### Authentication sessions
+
+Both `POST /authenticate` (username/password) and `POST /oauth/token` (OAuth2 client credentials) start a session and return a token for it. The token is just a key to that session - the session is what decides whether it still works.
+
+Every request made with the token slides its session forward, so a long running automation never loses its authentication mid-run. The token itself never changes, so clients need no special handling - keep sending the one you got.
+
+A session ends when:
+
+- it is **not used for `--token-ttl`** (default 1 hour). This is the only thing that expires an actively working client - keep making requests and the session stays alive indefinitely
+- a **user session** reaches `--max-session-age` (default 24 hours) from the moment of login, no matter how much it is used. After that the user authenticates again. Set `--max-session-age=0` to remove this limit. **Client credentials sessions have no such limit** - the client holds a secret and could authenticate again at any time anyway
+- the user logs out (`POST /logout`), which drops the session immediately - the token stops working even though it is still correctly signed
+- **the hub restarts.** Sessions are held in memory only, so a restart ends all of them and everyone authenticates again
+
+Tokens issued by an external identity provider (validated through an origin secret key) have no session with the hub - they are valid for exactly as long as their own expiry says.
+
+In the UI this means you stay logged in while you work, and holding a device open on the device control page keeps your session alive even though that page makes no requests of its own. The existing 30 minute device inactivity timeout still applies there.
+
+Note that the Appium grid is **not** affected by any of this - `/grid/*` session requests authenticate with the `gads:clientSecret` capability, which does not expire. WebSocket and stream connections are authenticated when they are opened and are not interrupted if the session behind them later ends.
+
 ### Users administration
 
-You can add/delete users and change their roles/passwords via the `Admin` panel.  
-There are no limitations on usernames and passwords - only the default `admin` user cannot be deleted and its role changed(you can change its password though)
+You can add/delete users and change their roles/passwords via the `Admin` panel. LDAP-backed users are represented by shadow records so their roles and workspace assignments can be managed in GADS, but their passwords remain directory-managed and cannot be changed in GADS.
+
+Only the default local `admin` user cannot be deleted or have its role changed (you can change its local password).
 
 ### Providers administration
 
