@@ -17,6 +17,7 @@ import (
 	"embed"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -46,6 +47,10 @@ func main() {
 		"\nAlso you need to have created the folder in advance!")
 	hubCmd.Flags().String("turn-username-suffix", "gads", "Suffix to append to TURN usernames (format: timestamp:suffix)")
 	hubconfig.RegisterLDAPFlags(hubCmd.Flags())
+	hubCmd.Flags().Duration("token-ttl", time.Hour, "Validity of issued authentication tokens."+
+		"\nTokens are automatically renewed while they are being used, so this is effectively an inactivity timeout")
+	hubCmd.Flags().Duration("max-session-age", 24*time.Hour, "Maximum total lifetime of a user session, no matter how many times its token was renewed."+
+		"\nUse 0 for no limit. Tokens from the OAuth2 client credentials flow are not affected")
 	rootCmd.AddCommand(hubCmd)
 
 	// Provider Command
